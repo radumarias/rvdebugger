@@ -57,6 +57,7 @@ class VisualDebugger:
         self.current_step = defaultdict(int)  # next step id per thread
         self._last_step = {}                  # last StepNode per thread
         self._lane = {}                       # thread id -> 0-based lane index
+        self._watch = defaultdict(dict)       # thread id -> merged state vars
         self.pending_locks = {}               # f"{tid}_{lock}" -> step index
         self.mutex = threading.Lock()
 
@@ -74,6 +75,7 @@ class VisualDebugger:
         clock. ``depth`` indents the step within its lane (call depth),
         ``duration`` (seconds) draws a cost bar along the timeline axis, and
         ``state`` (a dict) is shown in the step label as ``key=value`` pairs.
+        Returns the created :class:`StepNode`.
         """
         with self.mutex:
             lane = self._lane.setdefault(thread_id, len(self._lane))
@@ -106,6 +108,8 @@ class VisualDebugger:
                 rr.set_time(self.timeline, timestamp=step.timestamp)
 
             self._visualize_step(step)
+            if state:
+                self._visualize_watch(step)
             if duration is not None:
                 self._visualize_duration_bar(step)
             if prev_step is not None:
@@ -122,6 +126,7 @@ class VisualDebugger:
                 self.on_lock_released(step)
 
         time.sleep(self.step_delay)  # paced outside the lock so threads overlap
+        return step
 
     # -- override hooks ---------------------------------------------------
 
@@ -137,11 +142,30 @@ class VisualDebugger:
         # Sanitize so arbitrary ids (TIDs, names) form valid entity paths.
         return f"{self.entity_prefix}_{re.sub(r'[^\w-]', '_', str(thread_id))}"
 
+    @staticmethod
+    def _fmt_value(value, max_len=40):
+        text = str(value)
+        return text if len(text) <= max_len else text[:max_len - 1] + "…"
+
     def _step_label(self, step):
         if not step.state:
             return step.function_name
-        pairs = ", ".join(f"{k}={v}" for k, v in step.state.items())
+        pairs = ", ".join(f"{k}={self._fmt_value(v)}" for k, v in step.state.items())
         return f"{step.function_name} [{pairs}]"
+
+    def _visualize_watch(self, step):
+        """Update the thread's variable-watch panel (a text document).
+
+        Values merge across steps like a debugger watch window; scrubbing the
+        timeline shows what each variable was at that moment.
+        """
+        watch = self._watch[step.thread_id]
+        watch.update(step.state)
+        lines = "\n".join(f"{k} = {v}" for k, v in sorted(watch.items()))
+        rr.log(
+            f"{self._thread_path(step.thread_id)}/vars",
+            rr.TextDocument(f"[{step.function_name} @ step {step.step_id}]\n{lines}"),
+        )
 
     def _visualize_step(self, step):
         """Render the step node as a labeled sphere."""
