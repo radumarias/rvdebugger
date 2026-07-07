@@ -15,12 +15,15 @@ debugger that attaches to arbitrary programs). Each demo manually drives a
 
 The repo also contains one unrelated geometry script (`ortho_to_3d.py`).
 
+Sample videos and specs live in a Google Drive folder linked from `README.md`.
+
 ## Development Commands
 
-**Setup virtual environment**:
+**Setup virtual environment** (this repo already has one at `venv/`, Python 3.14):
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source venv/bin/activate   # existing env
+# or create a fresh one (AGENTS.md prefers .venv for new envs):
+python -m venv .venv && source .venv/bin/activate
 ```
 
 **Install dependencies**:
@@ -39,6 +42,18 @@ python examples/deadlock.py   # deadlock: locks acquired in opposite orders
 ```bash
 python ortho_to_3d.py
 ```
+
+## Conventions (see AGENTS.md for the full guidelines)
+
+- PEP 8, 4-space indent, ≤88–100 char lines; imports ordered standard →
+  third-party → local; concise docstrings on public functions/classes.
+- **There is no test suite yet.** If adding tests: pytest, in a `tests/`
+  directory mirroring the package structure (e.g. `tests/test_lock.py`), run
+  with `pytest -q`.
+- Commits: imperative mood, scoped and atomic, e.g.
+  `fix(lock): prevent double acquire deadlock`; body explains why over what.
+- New example scripts stay thin (scenario only, shared logic goes in
+  `rvdebugger/`) and are guarded with `if __name__ == "__main__":`.
 
 ## Project Structure
 
@@ -66,16 +81,26 @@ rvdebugger/
 
 The reusable logic lives here; `examples/` only holds scenario scripts.
 
-- **`model.StepNode`**: one execution step — `thread_id`, `step_id`,
-  `function_name`, position (`x`, `y`), `timestamp`, and lock flags
-  (`has_lock`, `lock_acquired`, `lock_released`, `lock_name`).
+- **`model.StepNode`**: one execution step — `thread_id` (any hashable),
+  `step_id`, `function_name`, position (`x`, `y`), `timestamp`, lock flags
+  (`has_lock`, `lock_acquired`, `lock_released`, `lock_name`), plus `depth`
+  (call-stack depth), `duration` (seconds, optional), and `state` (dict of
+  variable values, optional).
 - **`debugger.VisualDebugger`**: coordinator. `add_step(...)` records a step,
   logs its geometry to Rerun, draws the flow link from the previous step, and
-  handles lock pins / mutex nodes. Threads call `add_step` directly (no
-  automatic instrumentation); the call is mutex-guarded so it is safe to call
-  concurrently. Customize without editing the class:
-  - constructor args `entity_prefix` (per-thread entity tree name) and
-    `step_color_fn` (recolor step nodes);
+  handles lock pins / mutex nodes. Thread ids may be any hashable value (real
+  OS TIDs, names); each id is assigned a lane in first-seen order. Every step
+  stamps the `trace_time` Rerun timeline with its timestamp — pass
+  `timestamp=` (seconds since epoch) to replay recorded traces (with
+  `step_delay=0`), or omit it for wall-clock live runs. `depth=` indents the
+  step within its lane, `duration=` draws a cost bar along the timeline axis,
+  `state=` appends `key=value` pairs to the step label. Threads call
+  `add_step` directly (no automatic instrumentation); the call is
+  mutex-guarded so it is safe to call concurrently. Customize without editing
+  the class:
+  - constructor args `entity_prefix` (per-thread entity tree name),
+    `step_color_fn` (recolor step nodes), `depth_indent`, `duration_scale`,
+    and `timeline` (Rerun timeline name, `None` to disable);
   - override `on_lock_acquired` / `on_lock_released` to draw extra geometry.
 - **`style`**: per-mutex color/height tables (`mutex1`..`mutex4`) and the
   default green/orange step color.
@@ -103,12 +128,16 @@ dimensions and emits a triangle mesh plus feature-edge wireframe;
 
 ## Visualization Layout (the concurrency demos)
 
-- **X-axis**: thread separation — `x = thread_id * 4.0`.
-- **Y-axis**: timeline / step progression — `y = step_id * 2.0`.
+- **X-axis**: thread separation — `x = lane * 4.0` (lanes assigned to thread
+  ids in first-seen order), plus `depth * 0.6` indentation for call depth.
+- **Y-axis**: timeline / step progression — `y = step_id * 2.0`; steps with a
+  `duration` also get a cost bar (`Boxes3D`) extending along Y.
 - **Z-axis**: lock operations, elevated above the execution plane (lock pins,
   with per-mutex heights ~2.0–2.6).
 - **Steps**: spheres (`Points3D`), green for normal work, orange while holding
-  a lock, labeled with the function name.
+  a lock, labeled with the function name (plus `key=value` state, if given).
+- **Time scrubber**: each step stamps the `trace_time` timeline with its
+  timestamp, so the viewer scrubs on event time (recorded or wall clock).
 - **Flow links**: thin blue (`LineStrips3D`) between consecutive steps.
 - **Locks**: an elevated pin per acquire/release, a gray Z-line tying the pin
   to its step, a colored acquire→release span, and a mutex box node
@@ -126,9 +155,13 @@ dimensions and emits a triangle mesh plus feature-edge wireframe;
 
 ## Notes for Future Work
 
-- `VisualDebugger` now supports **any number of threads** (thread ids are
-  tracked in a `defaultdict`); the examples happen to use two.
-- There is **no variable-state tracking** yet, despite earlier descriptions —
-  only steps and locks are visualized.
+- `VisualDebugger` supports **any number of threads with arbitrary hashable
+  ids** (mapped to lanes in first-seen order); the examples happen to use two
+  with ids 0/1.
+- Variable state is **display-only**: `state=` dicts land in step labels;
+  there is no state history panel or time-series plotting.
+- Replaying a profiler snapshot = construct with `step_delay=0` and call
+  `add_step(...)` per event with the recorded `timestamp=`; there is no
+  built-in adapter for any specific trace format yet.
 - The package is not pip-installable (no `pyproject.toml`); examples reach it
   via a `sys.path` shim. Add packaging if it needs to be imported elsewhere.
