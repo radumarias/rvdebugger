@@ -37,6 +37,16 @@ python examples/lock.py       # clean lock acquire/use/release across two thread
 python examples/deadlock.py   # deadlock: locks acquired in opposite orders
 ```
 
+**Profiler trace replay** (Chrome Trace Event Format — viztracer,
+torch.profiler, chrome://tracing):
+```bash
+python examples/replay_trace.py [trace.json]  # defaults to examples/demo_trace.json
+python examples/replay_trace.py examples/demo_lock_trace.json  # locks + deadlock
+# regenerate the committed samples (needs: pip install viztracer):
+python examples/make_trace.py       # producer/consumer workload
+python examples/make_lock_trace.py  # lock lifecycle + detected deadlock
+```
+
 **Run the orthographic-to-3D script** (expects a Rerun gRPC server on
 `127.0.0.1:9876`; it connects rather than spawning):
 ```bash
@@ -64,10 +74,16 @@ rvdebugger/
 │   ├── model.py        # StepNode dataclass
 │   ├── style.py        # Mutex colors/heights + default step color
 │   ├── debugger.py     # VisualDebugger class
-│   └── runtime.py      # init_viewer() and run_simulation() helpers
+│   ├── runtime.py      # init_viewer() and run_simulation() helpers
+│   └── trace.py        # Chrome Trace Event JSON loader + replay
 ├── examples/
 │   ├── lock.py         # Two threads with a clean lock lifecycle (good case)
-│   └── deadlock.py     # Deadlock scenario with opposite lock ordering
+│   ├── deadlock.py     # Deadlock scenario with opposite lock ordering
+│   ├── make_trace.py   # Generate demo_trace.json via viztracer (optional dep)
+│   ├── make_lock_trace.py   # Generate demo_lock_trace.json (locks + deadlock)
+│   ├── replay_trace.py # Replay a Chrome trace JSON in the 3D viewer
+│   ├── demo_trace.json # Committed sample trace (producer + 3 workers)
+│   └── demo_lock_trace.json # Committed sample with lock markers + deadlock
 ├── ortho_to_3d.py      # Reconstruct a 3D mesh from orthographic drawing dimensions
 ├── requirements.txt    # Single dependency: rerun-sdk>=0.24.0
 ├── AGENTS.md           # Repository contribution guidelines
@@ -106,6 +122,24 @@ The reusable logic lives here; `examples/` only holds scenario scripts.
   default green/orange step color.
 - **`runtime`**: `init_viewer(...)` (Rerun init + clean Y-up scene) and
   `run_simulation(debugger, *tasks)` (one thread per task function).
+- **`trace`**: `load_chrome_trace(path)` parses Chrome Trace Event Format
+  JSON (`ph: "X"` complete events, `"B"`/`"E"` pairs, `"i"` instants, `"C"`
+  counters; `thread_name` metadata; µs → seconds) into events with call
+  depth recovered from nesting; `replay_trace(debugger, events,
+  min_duration=, max_depth=)` feeds them to `add_step`. Build the debugger
+  with `step_delay=0` for replays. Two conventions bridge what the format
+  lacks:
+  - **Lock markers**: events named `LOCK <mutex>` / `RELEASE <mutex>` /
+    `BLOCKED <mutex>` (e.g. viztracer `log_instant`) replay as lock
+    operations — pins, spans, mutex boxes — and steps between acquire and
+    release are drawn as holding the lock. `BLOCKED` steps get a red
+    duration bar for the time spent waiting, and when two threads' lock
+    waits overlap while each held the lock the other wanted (pairwise
+    check; successful-but-contended acquires count too), a red `DEADLOCK
+    DETECTED` node links the two steps. See `examples/make_lock_trace.py`.
+  - **Variables**: `args.func_args` (viztracer `log_func_args=True`) becomes
+    each step's `state`; `log_var` samples (counters or `args.object`
+    instants) ride along on the thread's next drawn step.
 
 ### Examples
 
@@ -136,6 +170,9 @@ dimensions and emits a triangle mesh plus feature-edge wireframe;
   with per-mutex heights ~2.0–2.6).
 - **Steps**: spheres (`Points3D`), green for normal work, orange while holding
   a lock, labeled with the function name (plus `key=value` state, if given).
+- **Watch panel**: steps with `state=` also update a per-thread
+  `TextDocument` at `<thread>/vars` — a debugger-style watch window whose
+  values merge across steps and follow the time scrubber.
 - **Time scrubber**: each step stamps the `trace_time` timeline with its
   timestamp, so the viewer scrubs on event time (recorded or wall clock).
 - **Flow links**: thin blue (`LineStrips3D`) between consecutive steps.
@@ -160,8 +197,17 @@ dimensions and emits a triangle mesh plus feature-edge wireframe;
   with ids 0/1.
 - Variable state is **display-only**: `state=` dicts land in step labels;
   there is no state history panel or time-series plotting.
-- Replaying a profiler snapshot = construct with `step_delay=0` and call
-  `add_step(...)` per event with the recorded `timestamp=`; there is no
-  built-in adapter for any specific trace format yet.
+- Profiler replay has a built-in adapter only for **Chrome Trace Event
+  Format** (`rvdebugger/trace.py`); other formats (speedscope native,
+  collapsed stacks, pprof) would need their own loaders. The format has no
+  native lock semantics — lock pins only appear for traces instrumented with
+  the `LOCK`/`RELEASE`/`BLOCKED <mutex>` marker convention (see
+  `examples/make_lock_trace.py`); plain traces exercise steps, depth,
+  duration, vars, and the timeline.
+- viztracer (used only by `examples/make_trace.py`) is **not** in
+  `requirements.txt`; it is an optional dev dependency. On Python 3.12+ it
+  records helper threads as `Dummy-N`; `trace.rename_dummy_threads` repairs
+  this (renaming each thread to its entry function) — applied automatically
+  by `load_chrome_trace` and by `make_trace.py` when saving the sample file.
 - The package is not pip-installable (no `pyproject.toml`); examples reach it
   via a `sys.path` shim. Add packaging if it needs to be imported elsewhere.
