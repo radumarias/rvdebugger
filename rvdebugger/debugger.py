@@ -1,5 +1,6 @@
 """3D visual debugger for concurrent execution flow, logged to Rerun."""
 
+import re
 import threading
 import time
 from collections import defaultdict
@@ -15,9 +16,17 @@ class VisualDebugger:
 
     Scene layout (right-handed, Y up):
 
-    * **X** separates threads (``thread_id * thread_spacing``).
-    * **Y** is the per-thread timeline (``step_id * step_spacing``).
+    * **X** separates threads (``lane * thread_spacing``, lanes assigned to
+      thread ids in first-seen order), indented by ``depth * depth_indent``
+      for call-stack depth.
+    * **Y** is the per-thread timeline (``step_id * step_spacing``), with an
+      optional duration bar per step.
     * **Z** lifts lock pins above the execution plane.
+
+    Every step also stamps the ``timeline`` Rerun timeline (default
+    ``trace_time``) with the step's timestamp, so the viewer's time scrubber
+    follows event time — wall clock for live runs, or the recorded time when
+    replaying a profiler trace via ``add_step(..., timestamp=...)``.
 
     The class is general-purpose; scenarios customize it without copying the
     drawing code:
@@ -32,26 +41,42 @@ class VisualDebugger:
 
     def __init__(self, *, entity_prefix="thread", step_color_fn=None,
                  step_delay=0.1, thread_spacing=4.0, step_spacing=2.0,
-                 mutex_lane_x=2.0):
+                 mutex_lane_x=2.0, depth_indent=0.6, duration_scale=1.0,
+                 timeline="trace_time"):
         self.entity_prefix = entity_prefix
         self.step_color_fn = step_color_fn or style.default_step_color
         self.step_delay = step_delay
         self.thread_spacing = thread_spacing
         self.step_spacing = step_spacing
         self.mutex_lane_x = mutex_lane_x
+        self.depth_indent = depth_indent
+        self.duration_scale = duration_scale
+        self.timeline = timeline  # Rerun timeline name; None disables it
 
         self.steps = []
         self.current_step = defaultdict(int)  # next step id per thread
         self._last_step = {}                  # last StepNode per thread
+        self._lane = {}                       # thread id -> 0-based lane index
         self.pending_locks = {}               # f"{tid}_{lock}" -> step index
         self.mutex = threading.Lock()
 
     # -- public API -------------------------------------------------------
 
     def add_step(self, thread_id, function_name, *, has_lock=False,
-                 lock_acquired=False, lock_released=False, lock_name="mutex1"):
-        """Record and draw one execution step for ``thread_id``."""
+                 lock_acquired=False, lock_released=False, lock_name="mutex1",
+                 timestamp=None, depth=0, duration=None, state=None):
+        """Record and draw one execution step for ``thread_id``.
+
+        ``thread_id`` may be any hashable value (e.g. a real OS TID); each id
+        gets the next free lane in first-seen order. ``timestamp`` (seconds
+        since the epoch) stamps the step on the viewer timeline — pass the
+        recorded event time when replaying a trace; defaults to the wall
+        clock. ``depth`` indents the step within its lane (call depth),
+        ``duration`` (seconds) draws a cost bar along the timeline axis, and
+        ``state`` (a dict) is shown in the step label as ``key=value`` pairs.
+        """
         with self.mutex:
+            lane = self._lane.setdefault(thread_id, len(self._lane))
             step_id = self.current_step[thread_id]
             self.current_step[thread_id] += 1
 
@@ -59,20 +84,30 @@ class VisualDebugger:
                 thread_id=thread_id,
                 step_id=step_id,
                 function_name=function_name,
-                x=thread_id * self.thread_spacing,
+                x=lane * self.thread_spacing + depth * self.depth_indent,
                 y=step_id * self.step_spacing,
-                timestamp=time.time(),
+                timestamp=time.time() if timestamp is None else timestamp,
                 has_lock=has_lock,
                 lock_acquired=lock_acquired,
                 lock_released=lock_released,
                 lock_name=lock_name,
+                depth=depth,
+                duration=duration,
+                state=state,
             )
             self.steps.append(step)
 
             prev_step = self._last_step.get(thread_id)
             self._last_step[thread_id] = step
 
+            if self.timeline is not None:
+                # rr time state is per-thread; every rr.log below (including
+                # the override hooks) runs on this thread inside the mutex.
+                rr.set_time(self.timeline, timestamp=step.timestamp)
+
             self._visualize_step(step)
+            if duration is not None:
+                self._visualize_duration_bar(step)
             if prev_step is not None:
                 self._visualize_flow_link(prev_step, step)
 
@@ -99,7 +134,14 @@ class VisualDebugger:
     # -- drawing ----------------------------------------------------------
 
     def _thread_path(self, thread_id):
-        return f"{self.entity_prefix}_{thread_id}"
+        # Sanitize so arbitrary ids (TIDs, names) form valid entity paths.
+        return f"{self.entity_prefix}_{re.sub(r'[^\w-]', '_', str(thread_id))}"
+
+    def _step_label(self, step):
+        if not step.state:
+            return step.function_name
+        pairs = ", ".join(f"{k}={v}" for k, v in step.state.items())
+        return f"{step.function_name} [{pairs}]"
 
     def _visualize_step(self, step):
         """Render the step node as a labeled sphere."""
@@ -109,7 +151,19 @@ class VisualDebugger:
                 positions=[[step.x, step.y, 0.0]],
                 radii=[0.3],
                 colors=[self.step_color_fn(step)],
-                labels=[step.function_name],
+                labels=[self._step_label(step)],
+            ),
+        )
+
+    def _visualize_duration_bar(self, step):
+        """Draw a bar along the timeline axis proportional to ``duration``."""
+        length = step.duration * self.duration_scale
+        rr.log(
+            f"{self._thread_path(step.thread_id)}/duration_{step.step_id}",
+            rr.Boxes3D(
+                centers=[[step.x, step.y + length / 2, 0.0]],
+                sizes=[[0.16, length, 0.16]],
+                colors=[self.step_color_fn(step)],
             ),
         )
 
