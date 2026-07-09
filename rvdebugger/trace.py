@@ -16,6 +16,7 @@ debugger's lock pins, spans, and mutex boxes. See
 
 import json
 import re
+import ast
 from collections import defaultdict
 
 import rerun as rr
@@ -83,6 +84,8 @@ def load_chrome_trace(path):
         key = (ev.get("pid", 0), ev.get("tid", 0))
         args = ev.get("args")
         func_args = args.get("func_args") if isinstance(args, dict) else None
+        if func_args:
+            func_args = {k: _coerce(v) for k, v in func_args.items()}
         if ph == "X":
             per_thread[key].append((ev["ts"], ev.get("dur", 0),
                                     ev.get("name", "?"), func_args, False))
@@ -91,7 +94,7 @@ def load_chrome_trace(path):
             if isinstance(args, dict) and set(args) == {"object"}:
                 # viztracer log_var with a non-numeric value
                 per_thread[key].append((ev["ts"], 0, name,
-                                        {name: args["object"]}, True))
+                                        {name: _coerce(args["object"])}, True))
             else:
                 per_thread[key].append((ev["ts"], 0, name, func_args, False))
         elif ph == "C" and isinstance(args, dict):
@@ -134,6 +137,14 @@ def load_chrome_trace(path):
     events.sort(key=lambda e: e["ts"])
     return events
 
+def _coerce(value):
+    """Best effort recovery"""
+    if not isinstance(value, str):
+        return
+    try:
+        return ast.literal_eval(value)
+    except (ValueError, SyntaxError):
+        return value
 
 def _short_name(name):
     """Strip viztracer-style ``func (/path/file.py:12)`` location suffixes."""
