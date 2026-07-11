@@ -163,10 +163,7 @@ class VisualDebugger:
         return out
 
     def _step_label(self, step):
-        if not step.state:
-            return step.function_name
-        pairs = ", ".join(f"{k}={self._fmt_value(v)}" for k, v in step.state.items())
-        return f"{step.function_name} [{pairs}]"
+        return f"{step.function_name}"
 
     def _visualize_watch(self, step):
         """Update the thread's variable-watch panel (a text document).
