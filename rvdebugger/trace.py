@@ -137,10 +137,11 @@ def load_chrome_trace(path):
     events.sort(key=lambda e: e["ts"])
     return events
 
+
 def _coerce(value):
-    """Best effort recovery"""
+    """Best effort recovery for viztracer's repr()-style values via ast.literal_eval"""
     if not isinstance(value, str):
-        return
+        return value
     try:
         return ast.literal_eval(value)
     except (ValueError, SyntaxError):
