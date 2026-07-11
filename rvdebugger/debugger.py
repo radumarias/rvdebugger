@@ -147,15 +147,17 @@ class VisualDebugger:
         text = str(value)
         return text if len(text) <= max_len else text[:max_len - 1] + "…"
 
-     # -- flattening ------------------------------------------------------
-    def _flatten_state(self, state, prefix=""):
+    
+    # -- flattening ------------------------------------------------------
+    @staticmethod
+    def _flatten_state(state, prefix=""):
         if not state:
             return {}
-        out={}
+        out = {}
         for k, v in state.items():
             key = f"{prefix}{k}"
             if isinstance(v, dict):
-                out.update(self._flatten_state(v, prefix=f"{key}."))
+                out.update(VisualDebugger._flatten_state(v, prefix=f"{key}."))
             else:
                 out[key] = v
         return out
@@ -182,16 +184,18 @@ class VisualDebugger:
 
     def _visualize_step(self, step):
         """Render the step node as a labeled sphere."""
+        entity = f"{self._thread_path(step.thread_id)}/step_{step.step_id}"
         rr.log(
-            f"{self._thread_path(step.thread_id)}/step_{step.step_id}",
+            entity,
             rr.Points3D(
                 positions=[[step.x, step.y, 0.0]],
                 radii=[0.3],
                 colors=[self.step_color_fn(step)],
                 labels=[self._step_label(step)],
             ),
-            rr.AnyValues(**self._flatten_state(step.state, "var.")) 
         )
+        if step.state:
+            rr.log(entity, rr.AnyValues(**self._flatten_state(step.state, "var.")))
 
     def _visualize_duration_bar(self, step):
         """Draw a bar along the timeline axis proportional to ``duration``."""
